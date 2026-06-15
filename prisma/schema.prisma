@@ -1,0 +1,512 @@
+// Slogani Consults Digital Platform — Prisma schema
+//
+// Phase 0.1: full Phase-1 data model + future-ready financial models (Phase 3).
+//
+// Design rules honored here:
+//  - Wallet.balance is a CACHE; source of truth is sum(TokenTransaction). Ledger is append-only.
+//  - VerificationLog + TokenTransaction are written in ONE db transaction (enforced in app layer).
+//  - PII (NIN, biometrics) is never stored raw; we persist ciphertext (`*Encrypted`) + a
+//    blind index hash for lookup + a display-safe suffix. Encryption is app-layer.
+//
+// Prisma 7 notes: connection URL is in prisma.config.ts, not the datasource block.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // Prisma 7: connection URL lives in prisma.config.ts (datasource.url),
+  // NOT here. The client connects via a driver adapter (see src/lib/db.ts, Phase 0.5).
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The four platform roles (see src/lib/auth/roles.ts for the app-level mirror).
+enum Role {
+  CUSTOMER
+  AGENT
+  CORPORATE
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  PENDING
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum IdentityStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum AgentStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+  REJECTED
+}
+
+enum CorporateStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+  REJECTED
+}
+
+enum ServiceCategory {
+  NIN_ENROLLMENT
+  NIN_VERIFICATION
+  NIN_MODIFICATION
+  DIASPORA_ENROLLMENT
+  CORPORATE_VERIFICATION
+  BIOMETRIC_CAPTURE
+}
+
+enum LocationType {
+  NIGERIA
+  INTERNATIONAL
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  RESCHEDULED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum RequestType {
+  ENROLLMENT
+  MODIFICATION
+  VERIFICATION
+  DIASPORA_ENROLLMENT
+}
+
+enum RequestStatus {
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  COMPLETED
+}
+
+enum DocumentType {
+  PASSPORT
+  NATIONAL_ID
+  BIRTH_CERTIFICATE
+  PROOF_OF_ADDRESS
+  PHOTO
+  BIOMETRIC
+  OTHER
+}
+
+enum DocumentStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+enum NotificationType {
+  APPOINTMENT_CONFIRMATION
+  APPOINTMENT_UPDATE
+  ENROLLMENT_UPDATE
+  VERIFICATION_UPDATE
+  AGENT_NOTICE
+  CORPORATE_USAGE_ALERT
+  SYSTEM
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+}
+
+// Future-ready (Phase 3) — KYC token system.
+enum TransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum VerificationType {
+  BASIC_NIN
+  IDENTITY_MATCH
+  BIOMETRIC
+  PREMIUM
+}
+
+enum VerificationStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth.js (NextAuth v5) — adapter models
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  emailVerified DateTime?
+  passwordHash  String? // credentials provider (bcrypt); null for pure-OAuth users
+  name          String?
+  phone         String?
+  image         String?
+  role          Role       @default(CUSTOMER)
+  status        UserStatus @default(ACTIVE)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  // Auth.js relations
+  accounts Account[]
+  sessions Session[]
+
+  // Domain relations
+  profile          Profile?
+  agentProfile     AgentProfile?
+  corporateProfile CorporateProfile?
+  wallet           Wallet?
+
+  customerAppointments Appointment[]       @relation("CustomerAppointments")
+  agentAppointments    Appointment[]       @relation("AgentAppointments")
+  customerRequests     EnrollmentRequest[] @relation("CustomerRequests")
+  agentRequests        EnrollmentRequest[] @relation("AgentRequests")
+
+  ownedDocuments    Document[]        @relation("DocumentOwner")
+  uploadedDocuments Document[]        @relation("DocumentUploader")
+  notifications     Notification[]
+  verificationLogs  VerificationLog[]
+  auditLogs         AuditLog[]        @relation("AuditActor")
+
+  @@index([role])
+  @@index([status])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String // email / phone being verified, or password-reset subject
+  token      String   @unique
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Profiles
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Profile {
+  id          String    @id @default(cuid())
+  userId      String    @unique
+  firstName   String?
+  lastName    String?
+  dateOfBirth DateTime?
+  gender      String?
+  nationality String?
+  country     String?
+  state       String?
+  city        String?
+  address     String?
+
+  // PII — never store raw NIN. Ciphertext + blind-index hash + display suffix.
+  ninEncrypted   String? // app-layer encrypted
+  ninHash        String?        @unique // deterministic hash for lookup/dedupe
+  ninLast4       String?
+  identityStatus IdentityStatus @default(UNVERIFIED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AgentProfile {
+  id           String      @id @default(cuid())
+  userId       String      @unique
+  businessName String?
+  agentCode    String      @unique
+  status       AgentStatus @default(PENDING)
+  region       String?
+  coverageArea String?
+  approvedAt   DateTime?
+  approvedById String? // admin User id (no FK back-relation; kept loose intentionally)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model CorporateProfile {
+  id            String          @id @default(cuid())
+  userId        String          @unique
+  companyName   String
+  rcNumber      String? // CAC registration number
+  industry      String?
+  contactPerson String?
+  contactPhone  String?
+  status        CorporateStatus @default(PENDING)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Catalog
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Service {
+  id          String          @id @default(cuid())
+  slug        String          @unique
+  name        String
+  category    ServiceCategory
+  description String?
+  basePrice   Decimal?        @db.Decimal(12, 2) // NGN; pricing defined later
+  tokenCost   Int? // future-ready: KYC token cost for this service
+  active      Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  appointments Appointment[]
+  requests     EnrollmentRequest[]
+
+  @@index([category])
+  @@index([active])
+}
+
+model Location {
+  id        String       @id @default(cuid())
+  name      String
+  type      LocationType @default(NIGERIA)
+  country   String
+  state     String?
+  city      String?
+  address   String?
+  timezone  String?
+  active    Boolean      @default(true)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  appointments Appointment[]
+
+  @@index([type])
+  @@index([active])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Appointment {
+  id           String            @id @default(cuid())
+  reference    String            @unique
+  customerId   String
+  agentId      String?
+  serviceId    String
+  locationId   String
+  scheduledFor DateTime
+  status       AppointmentStatus @default(PENDING)
+  notes        String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  customer User     @relation("CustomerAppointments", fields: [customerId], references: [id], onDelete: Cascade)
+  agent    User?    @relation("AgentAppointments", fields: [agentId], references: [id], onDelete: SetNull)
+  service  Service  @relation(fields: [serviceId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+
+  documents Document[]
+  requests  EnrollmentRequest[]
+
+  @@index([customerId])
+  @@index([agentId])
+  @@index([status])
+  @@index([scheduledFor])
+}
+
+model EnrollmentRequest {
+  id            String        @id @default(cuid())
+  reference     String        @unique
+  customerId    String
+  agentId       String?
+  serviceId     String?
+  appointmentId String?
+  type          RequestType
+  status        RequestStatus @default(SUBMITTED)
+  details       Json?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  customer    User         @relation("CustomerRequests", fields: [customerId], references: [id], onDelete: Cascade)
+  agent       User?        @relation("AgentRequests", fields: [agentId], references: [id], onDelete: SetNull)
+  service     Service?     @relation(fields: [serviceId], references: [id])
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  documents Document[]
+
+  @@index([customerId])
+  @@index([agentId])
+  @@index([status])
+  @@index([type])
+}
+
+model Document {
+  id                  String         @id @default(cuid())
+  ownerId             String
+  uploadedById        String?
+  type                DocumentType
+  status              DocumentStatus @default(PENDING)
+  url                 String // Cloudinary secure URL
+  publicId            String? // Cloudinary public_id (for deletion)
+  mimeType            String?
+  sizeBytes           Int?
+  appointmentId       String?
+  enrollmentRequestId String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  owner       User               @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  uploadedBy  User?              @relation("DocumentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  appointment Appointment?       @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  request     EnrollmentRequest? @relation(fields: [enrollmentRequestId], references: [id], onDelete: SetNull)
+
+  @@index([ownerId])
+  @@index([type])
+  @@index([status])
+}
+
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  type      NotificationType
+  channel   NotificationChannel @default(IN_APP)
+  title     String
+  body      String?
+  data      Json?
+  read      Boolean             @default(false)
+  readAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([createdAt])
+}
+
+// Append-only. Never updated or deleted.
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String? // null = system action
+  action    String // e.g. "agent.approve", "appointment.cancel"
+  entity    String // e.g. "Appointment"
+  entityId  String?
+  metadata  Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Financial layer — KYC tokens (future-ready, Phase 3; no UI yet)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique // owner: an AGENT or CORPORATE user
+  balance   Int      @default(0) // CACHE of sum(TokenTransaction); never the source of truth
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions     TokenTransaction[]
+  verificationLogs VerificationLog[]
+}
+
+// Append-only ledger — the SOURCE OF TRUTH for token balances.
+model TokenTransaction {
+  id           String          @id @default(cuid())
+  walletId     String
+  type         TransactionType
+  amount       Int // always positive; `type` gives the sign
+  balanceAfter Int? // snapshot of cached balance after applying (for audit)
+  reference    String?         @unique
+  reason       String?
+  createdById  String? // admin/system actor for issued credits
+  createdAt    DateTime        @default(now())
+
+  wallet          Wallet           @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  verificationLog VerificationLog? @relation("VerificationDebit")
+
+  @@index([walletId])
+  @@index([createdAt])
+}
+
+// Written in the SAME db transaction as its debit TokenTransaction.
+model VerificationLog {
+  id                  String             @id @default(cuid())
+  userId              String // who performed the verification (agent/corporate)
+  walletId            String?
+  verificationType    VerificationType
+  tokenCost           Int                @default(0)
+  status              VerificationStatus @default(PENDING)
+  subjectRefEncrypted String? // app-layer encrypted reference to the identity verified
+  result              Json?
+  tokenTransactionId  String?            @unique // the debit entry
+  createdAt           DateTime           @default(now())
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet           Wallet?           @relation(fields: [walletId], references: [id], onDelete: SetNull)
+  tokenTransaction TokenTransaction? @relation("VerificationDebit", fields: [tokenTransactionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
