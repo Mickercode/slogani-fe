@@ -3,6 +3,7 @@ import { authConfig } from "@/auth.config";
 
 // Edge-safe instance built from the config WITHOUT the Credentials provider /
 // Prisma adapter (those are Node-only). The `authorized` callback enforces RBAC.
+// (Next 16 renamed "middleware" to "proxy" — same functionality.)
 export default NextAuth(authConfig).auth;
 
 export const config = {

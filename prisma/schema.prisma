@@ -454,6 +454,21 @@ model AuditLog {
   @@index([createdAt])
 }
 
+// Public contact-form submissions (no account required).
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  phone     String?
+  subject   String?
+  message   String
+  handled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([handled])
+  @@index([createdAt])
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Financial layer — KYC tokens (future-ready, Phase 3; no UI yet)
 // ─────────────────────────────────────────────────────────────────────────────

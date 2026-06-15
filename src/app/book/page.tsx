@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
-import { CalendarCheck, CircleAlert } from "lucide-react";
+import Link from "next/link";
+import { CircleAlert, Lock } from "lucide-react";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/db";
 import { Section, SectionHeading } from "@/components/ui/section";
-import { Button } from "@/components/ui/button";
-import { bookingServices, locations } from "@/lib/site";
+import { buttonVariants } from "@/components/ui/button";
+import { BookingForm } from "@/components/booking/booking-form";
 
 export const metadata: Metadata = {
   title: "Book an Appointment",
@@ -18,65 +21,55 @@ const steps = [
   "Receive confirmation",
 ];
 
-export default function BookPage() {
+export default async function BookPage() {
+  const session = await auth();
+
+  const [services, locations] = await Promise.all([
+    prisma.service.findMany({
+      where: { active: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    }),
+    prisma.location.findMany({
+      where: { active: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    }),
+  ]);
+
   return (
     <Section>
       <SectionHeading
         eyebrow="Book an Appointment"
         title="Schedule your enrollment or verification session"
-        intro="Select a service and location, choose a date, and submit your request. You'll receive a confirmation with the details."
+        intro="Select a service and location, choose a date, and submit your request. You'll receive a confirmation with a reference you can track from your dashboard."
       />
 
       <div className="mt-12 grid gap-10 lg:grid-cols-[1.4fr_1fr]">
-        {/* Booking form (UI scaffold — submission wired in a later phase) */}
-        <form className="glass-card p-6 shadow-sm sm:p-8">
-          <div className="grid gap-5 sm:grid-cols-2">
-            <Field label="Full name" htmlFor="name">
-              <input id="name" name="name" type="text" autoComplete="name" className={inputClass} required />
-            </Field>
-            <Field label="Email" htmlFor="email">
-              <input id="email" name="email" type="email" autoComplete="email" className={inputClass} required />
-            </Field>
-            <Field label="Phone" htmlFor="phone">
-              <input id="phone" name="phone" type="tel" autoComplete="tel" className={inputClass} />
-            </Field>
-            <Field label="Preferred date" htmlFor="date">
-              <input id="date" name="date" type="date" className={inputClass} />
-            </Field>
-            <Field label="Service" htmlFor="service">
-              <select id="service" name="service" className={inputClass} defaultValue="" required>
-                <option value="" disabled>Select a service</option>
-                {bookingServices.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Location" htmlFor="location">
-              <select id="location" name="location" className={inputClass} defaultValue="" required>
-                <option value="" disabled>Select a location</option>
-                {locations.map((l) => (
-                  <option key={l.city} value={l.city}>
-                    {l.city}{l.type === "nigeria" ? ` — ${l.region}` : " (International)"}
-                  </option>
-                ))}
-              </select>
-            </Field>
+        {session?.user ? (
+          <BookingForm services={services} locations={locations} />
+        ) : (
+          <div className="glass-card flex flex-col items-start gap-4 p-8">
+            <span className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <Lock className="h-5 w-5" />
+            </span>
+            <h2 className="text-xl font-semibold text-foreground">
+              Sign in to book your appointment
+            </h2>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              Create a free account or sign in so we can attach your appointment to
+              your profile and let you track its status.
+            </p>
+            <div className="mt-2 flex flex-col gap-3 sm:flex-row">
+              <Link href="/register" className={buttonVariants({ variant: "accent", size: "lg" })}>
+                Create account
+              </Link>
+              <Link href="/login" className={buttonVariants({ variant: "outline", size: "lg" })}>
+                Sign in
+              </Link>
+            </div>
           </div>
-
-          <Field label="Notes (optional)" htmlFor="notes" className="mt-5">
-            <textarea
-              id="notes"
-              name="notes"
-              rows={4}
-              className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            />
-          </Field>
-
-          <Button type="submit" variant="accent" size="lg" className="mt-6 w-full sm:w-auto">
-            <CalendarCheck className="h-4 w-4" />
-            Submit Request
-          </Button>
-        </form>
+        )}
 
         {/* Sidebar */}
         <aside className="space-y-6">
@@ -104,29 +97,5 @@ export default function BookPage() {
         </aside>
       </div>
     </Section>
-  );
-}
-
-const inputClass =
-  "h-11 w-full rounded-md border border-border bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-
-function Field({
-  label,
-  htmlFor,
-  className,
-  children,
-}: {
-  label: string;
-  htmlFor: string;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={className}>
-      <label htmlFor={htmlFor} className="mb-1.5 block text-sm font-medium text-foreground">
-        {label}
-      </label>
-      {children}
-    </div>
   );
 }

@@ -1,5 +1,5 @@
 import "dotenv/config"; // Prisma 7 does not auto-load .env in this config file
-import { defineConfig, env } from "prisma/config";
+import { defineConfig } from "prisma/config";
 
 // Prisma 7 moved connection config out of schema.prisma into this file.
 // `datasource.url` is used by Migrate / introspection (CLI). The runtime
@@ -7,8 +7,9 @@ import { defineConfig, env } from "prisma/config";
 export default defineConfig({
   schema: "prisma/schema.prisma",
   datasource: {
-    // Migrations need a DIRECT connection (Supabase Session mode, port 5432) —
-    // the pooled runtime connection can't run DDL / advisory locks reliably.
-    url: env("DIRECT_URL"),
+    // Used only by Migrate/introspection. Read via process.env (not the throwing
+    // `env()` helper) so `prisma generate` succeeds at build time even when
+    // DIRECT_URL isn't present (e.g. CI). Runtime DB access uses the pg adapter.
+    url: process.env.DIRECT_URL ?? "",
   },
 });
